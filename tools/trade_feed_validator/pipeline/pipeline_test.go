@@ -102,7 +102,7 @@ func TestRFC3339TimestampsAreAccepted(t *testing.T) {
 }
 
 func TestColumnsAreMatchedByName(t *testing.T) {
-	feed := "ingested_at,amount,side,wallet,block_time,tx_hash,event_id\n" +
+	feed := "\ufeffingested_at,amount,side,wallet,block_time,tx_hash,event_id\n" + // leading BOM, as Excel writes it
 		"09:14:05,120000,BUY,0xD4,09:14:02,0xaa1,evt_001\n"
 	result := process(t, feed)
 	if len(result.Clean) != 1 || result.Clean[0].EventID != "evt_001" || result.Clean[0].Amount != 120000 {
@@ -115,10 +115,16 @@ func TestMissingHeaderColumnIsAnError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "block_time") {
 		t.Fatalf("expected missing columns error, got %v", err)
 	}
+
+	_, err = NewPipeline(feedDate).Process(strings.NewReader(strings.TrimSuffix(header, "\n") + ",amount\n"))
+	if err == nil || !strings.Contains(err.Error(), "duplicate column") {
+		t.Fatalf("expected duplicate column error, got %v", err)
+	}
 }
 
 func TestBadRowsGoToDeadLetterWithoutStoppingThePipeline(t *testing.T) {
 	feed := header +
+		"\n" + // blank line, skipped by the CSV reader but counted in line numbers
 		"evt_1,0x1,09:00:00,0xA,BUY\n" + // too few fields
 		"evt_2,0x2,09:00:00,0xA,BUY,12.5,09:00:01\n" + // not an integer
 		"evt_3,0x3,9am,0xA,BUY,10,09:00:01\n" + // bad timestamp
@@ -139,11 +145,17 @@ func TestBadRowsGoToDeadLetterWithoutStoppingThePipeline(t *testing.T) {
 	if len(result.Clean) != 1 || result.Clean[0].EventID != "evt_4" || result.Clean[0].Side != models.SideSell {
 		t.Errorf("expected only evt_4 to be clean, got %+v", result.Clean)
 	}
+	for i, r := range result.DeadLetter {
+		if want := i + 3; r.Line != want {
+			t.Errorf("%s: line = %d, want physical line %d", r.EventID(), r.Line, want)
+		}
+	}
 }
 
 func TestInvalidCSVRowIsDeadLetteredAndProcessingContinues(t *testing.T) {
 	feed := header +
 		"evt_1,0x1,09:00:00,0xA,BUY,10,09:00:01\n" +
+		"\n" +
 		"evt_2,0x\"2,09:00:00,0xA,BUY,10,09:00:01\n" + // bare quote inside a field
 		"evt_3,0x3,09:00:00,0xA,SELL,10,09:00:01\n"
 	result := process(t, feed)
@@ -155,8 +167,11 @@ func TestInvalidCSVRowIsDeadLetteredAndProcessingContinues(t *testing.T) {
 		t.Fatalf("expected 1 dead-lettered row, got %+v", result.DeadLetter)
 	}
 	r := result.DeadLetter[0]
-	if r.Line != 3 || len(r.Errors) != 1 || r.Errors[0].Code != models.CodeMalformedRow {
-		t.Errorf("got line %d errors %+v, want line 3 malformed_row", r.Line, r.Errors)
+	if r.Line != 4 || len(r.Errors) != 1 || r.Errors[0].Code != models.CodeMalformedRow {
+		t.Errorf("got line %d errors %+v, want line 4 malformed_row", r.Line, r.Errors)
+	}
+	if want := "evt_2,0x\"2,09:00:00,0xA,BUY,10,09:00:01"; r.RawLine != want {
+		t.Errorf("raw line = %q, want %q", r.RawLine, want)
 	}
 }
 
@@ -211,6 +226,15 @@ func TestWriteOutputs(t *testing.T) {
 	if strings.Join(names, ",") != "clean.csv,dead_letter.csv" {
 		t.Errorf("output dir contains %v, want only clean.csv and dead_letter.csv", names)
 	}
+	for _, name := range names {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o644 {
+			t.Errorf("%s has permissions %o, want 644", name, perm)
+		}
+	}
 
 	clean := readCSV(t, filepath.Join(dir, "clean.csv"))
 	if len(clean) != 1+4 {
@@ -224,14 +248,17 @@ func TestWriteOutputs(t *testing.T) {
 	if len(dead) != 1+4 {
 		t.Fatalf("dead_letter.csv has %d rows, want header + 4", len(dead))
 	}
-	codeCol := len(dead[0]) - 2
-	if dead[0][codeCol] != "error_codes" {
+	codeCol, rawCol := len(dead[0])-3, len(dead[0])-1
+	if dead[0][codeCol] != "error_codes" || dead[0][rawCol] != "raw_line" {
 		t.Fatalf("unexpected dead_letter header: %v", dead[0])
 	}
 	for _, row := range dead[1:] {
 		if row[1] == "evt_005" {
 			if row[3] != "null" || row[codeCol] != string(models.CodeMissingBlockTime) {
 				t.Errorf("evt_005 must keep its raw values and reason, got %v", row)
+			}
+			if want := "evt_005,0xaa4,null,0xE5,SELL,30000,09:58:30"; row[rawCol] != want {
+				t.Errorf("evt_005 raw_line = %q, want %q", row[rawCol], want)
 			}
 			return
 		}

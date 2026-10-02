@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -19,9 +20,10 @@ var Columns = []string{"event_id", "tx_hash", "block_time", "wallet", "side", "a
 
 // Rejected is a row sent to the dead-letter queue.
 type Rejected struct {
-	Line   int
-	Raw    []string
-	Errors []models.ValidationError
+	Line    int
+	Raw     []string
+	RawLine string // original text of the row, kept even when it is not valid CSV
+	Errors  []models.ValidationError
 }
 
 func (r Rejected) EventID() string {
@@ -60,7 +62,8 @@ func NewPipeline(feedDate time.Time) *Pipeline {
 }
 
 func (p *Pipeline) Process(r io.Reader) (*Result, error) {
-	reader := csv.NewReader(r)
+	capture := &rowCapture{r: r}
+	reader := csv.NewReader(capture)
 	reader.FieldsPerRecord = -1
 	reader.TrimLeadingSpace = true
 
@@ -68,23 +71,23 @@ func (p *Pipeline) Process(r io.Reader) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read header: %w", err)
 	}
+	capture.take(reader.InputOffset())
 	index, err := columnIndex(header)
 	if err != nil {
 		return nil, err
 	}
 
 	result := &Result{}
-	line := 1
 	for {
 		record, err := reader.Read()
 		if err == io.EOF {
 			break
 		}
-		line++
+		rawLine := capture.take(reader.InputOffset())
 		var parseErr *csv.ParseError
 		if errors.As(err, &parseErr) {
 			raw := ordered(record, index)
-			result.DeadLetter = append(result.DeadLetter, Rejected{Line: line, Raw: raw, Errors: []models.ValidationError{{
+			result.DeadLetter = append(result.DeadLetter, Rejected{Line: parseErr.StartLine, Raw: raw, RawLine: rawLine, Errors: []models.ValidationError{{
 				EventID: nullable(strings.TrimSpace(raw[0])),
 				Code:    models.CodeMalformedRow,
 				Field:   "row",
@@ -93,9 +96,10 @@ func (p *Pipeline) Process(r io.Reader) (*Result, error) {
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("line %d: failed to read record: %w", line, err)
+			return nil, fmt.Errorf("failed to read record: %w", err)
 		}
 
+		line, _ := reader.FieldPos(0)
 		raw := ordered(record, index)
 		event, errs := p.parseRecord(record, index)
 		if len(errs) == 0 {
@@ -104,12 +108,39 @@ func (p *Pipeline) Process(r io.Reader) (*Result, error) {
 		}
 
 		if len(errs) > 0 {
-			result.DeadLetter = append(result.DeadLetter, Rejected{Line: line, Raw: raw, Errors: errs})
+			result.DeadLetter = append(result.DeadLetter, Rejected{Line: line, Raw: raw, RawLine: rawLine, Errors: errs})
 			continue
 		}
 		result.Clean = append(result.Clean, event)
 	}
 	return result, nil
+}
+
+// rowCapture keeps the bytes the CSV reader has pulled from the input, so the
+// original text of each row can be cut out using csv.Reader.InputOffset.
+type rowCapture struct {
+	r      io.Reader
+	buf    bytes.Buffer
+	offset int64 // input offset of the first byte in buf
+}
+
+func (c *rowCapture) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.buf.Write(p[:n])
+	return n, err
+}
+
+// take returns the input text up to the end offset and drops it from the buffer.
+func (c *rowCapture) take(end int64) string {
+	n := int(end - c.offset)
+	if n < 0 {
+		n = 0
+	}
+	if n > c.buf.Len() {
+		n = c.buf.Len()
+	}
+	c.offset += int64(n)
+	return strings.Trim(string(c.buf.Next(n)), "\r\n")
 }
 
 func (p *Pipeline) ProcessFile(filename string) (*Result, error) {
@@ -124,7 +155,14 @@ func (p *Pipeline) ProcessFile(filename string) (*Result, error) {
 func columnIndex(header []string) (map[string]int, error) {
 	index := make(map[string]int, len(header))
 	for i, name := range header {
-		index[strings.ToLower(strings.TrimSpace(name))] = i
+		if i == 0 {
+			name = strings.TrimPrefix(name, "\ufeff")
+		}
+		key := strings.ToLower(strings.TrimSpace(name))
+		if _, dup := index[key]; dup {
+			return nil, fmt.Errorf("header has duplicate column %q", key)
+		}
+		index[key] = i
 	}
 	var missing []string
 	for _, col := range Columns {
@@ -251,7 +289,7 @@ func WriteClean(w io.Writer, events []models.TradeEvent) error {
 
 func WriteDeadLetter(w io.Writer, rejected []Rejected) error {
 	cw := csv.NewWriter(w)
-	if err := cw.Write(append(append([]string{"line"}, Columns...), "error_codes", "error_details")); err != nil {
+	if err := cw.Write(append(append([]string{"line"}, Columns...), "error_codes", "error_details", "raw_line")); err != nil {
 		return err
 	}
 	for _, r := range rejected {
@@ -262,7 +300,7 @@ func WriteDeadLetter(w io.Writer, rejected []Rejected) error {
 			details[i] = e.Field + ": " + e.Reason
 		}
 		row := append([]string{strconv.Itoa(r.Line)}, r.Raw...)
-		row = append(row, strings.Join(codes, ";"), strings.Join(details, "; "))
+		row = append(row, strings.Join(codes, ";"), strings.Join(details, "; "), r.RawLine)
 		if err := cw.Write(row); err != nil {
 			return err
 		}
@@ -315,6 +353,11 @@ func WriteOutputs(dir string, result *Result) error {
 func writeTemp(dir, name string, write func(io.Writer) error) (string, error) {
 	f, err := os.CreateTemp(dir, "."+name+".tmp-*")
 	if err != nil {
+		return "", err
+	}
+	if err := f.Chmod(0o644); err != nil {
+		f.Close()
+		os.Remove(f.Name())
 		return "", err
 	}
 	if err := write(f); err != nil {
