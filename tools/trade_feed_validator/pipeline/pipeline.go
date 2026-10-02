@@ -1,0 +1,287 @@
+package pipeline
+
+import (
+	"encoding/csv"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"trade_feed_validator/models"
+	"trade_feed_validator/validator"
+)
+
+var Columns = []string{"event_id", "tx_hash", "block_time", "wallet", "side", "amount", "ingested_at"}
+
+// Rejected is a row sent to the dead-letter queue.
+type Rejected struct {
+	Line   int
+	Raw    []string
+	Errors []models.ValidationError
+}
+
+func (r Rejected) EventID() string {
+	if len(r.Raw) > 0 {
+		return r.Raw[0]
+	}
+	return ""
+}
+
+type Result struct {
+	Clean      []models.TradeEvent
+	DeadLetter []Rejected
+	RawVolume  int64 // sum of amount over every parseable row, i.e. what the old pipeline would load
+}
+
+func (r *Result) CleanVolume() int64 {
+	var total int64
+	for _, e := range r.Clean {
+		total += e.Amount
+	}
+	return total
+}
+
+type Pipeline struct {
+	// FeedDate is the UTC day the feed belongs to. The sample feed only has
+	// times of day, so they are anchored to this date instead of time.Now().
+	FeedDate  time.Time
+	validator *validator.Validator
+}
+
+func NewPipeline(feedDate time.Time) *Pipeline {
+	return &Pipeline{
+		FeedDate:  time.Date(feedDate.Year(), feedDate.Month(), feedDate.Day(), 0, 0, 0, 0, time.UTC),
+		validator: validator.NewValidator(),
+	}
+}
+
+func (p *Pipeline) Process(r io.Reader) (*Result, error) {
+	reader := csv.NewReader(r)
+	reader.FieldsPerRecord = -1
+	reader.TrimLeadingSpace = true
+
+	header, err := reader.Read()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read header: %w", err)
+	}
+	index, err := columnIndex(header)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &Result{}
+	line := 1
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		line++
+		if err != nil {
+			return nil, fmt.Errorf("line %d: failed to read record: %w", line, err)
+		}
+
+		raw := ordered(record, index)
+		event, errs := p.parseRecord(record, index)
+		if len(errs) == 0 {
+			result.RawVolume += event.Amount
+			errs = p.validator.Validate(event)
+		}
+
+		if len(errs) > 0 {
+			result.DeadLetter = append(result.DeadLetter, Rejected{Line: line, Raw: raw, Errors: errs})
+			continue
+		}
+		result.Clean = append(result.Clean, event)
+	}
+	return result, nil
+}
+
+func (p *Pipeline) ProcessFile(filename string) (*Result, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+	return p.Process(file)
+}
+
+func columnIndex(header []string) (map[string]int, error) {
+	index := make(map[string]int, len(header))
+	for i, name := range header {
+		index[strings.ToLower(strings.TrimSpace(name))] = i
+	}
+	var missing []string
+	for _, col := range Columns {
+		if _, ok := index[col]; !ok {
+			missing = append(missing, col)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("header is missing columns: %s", strings.Join(missing, ", "))
+	}
+	return index, nil
+}
+
+func ordered(record []string, index map[string]int) []string {
+	out := make([]string, len(Columns))
+	for i, col := range Columns {
+		if j := index[col]; j < len(record) {
+			out[i] = record[j]
+		}
+	}
+	return out
+}
+
+func (p *Pipeline) parseRecord(record []string, index map[string]int) (models.TradeEvent, []models.ValidationError) {
+	get := func(col string) string { return strings.TrimSpace(record[index[col]]) }
+	eventID := ""
+	if index["event_id"] < len(record) {
+		eventID = get("event_id")
+	}
+
+	for _, col := range Columns {
+		if index[col] >= len(record) {
+			return models.TradeEvent{}, []models.ValidationError{{
+				EventID: eventID,
+				Code:    models.CodeMalformedRow,
+				Field:   col,
+				Reason:  fmt.Sprintf("row has %d fields, expected %d", len(record), len(Columns)),
+			}}
+		}
+	}
+
+	var errs []models.ValidationError
+	fail := func(code models.Code, field, reason string) {
+		errs = append(errs, models.ValidationError{EventID: eventID, Code: code, Field: field, Reason: reason})
+	}
+
+	blockTime, err := p.parseTime(get("block_time"))
+	if err != nil {
+		fail(models.CodeInvalidTimestamp, "block_time", err.Error())
+	}
+	ingestedAt, err := p.parseTime(get("ingested_at"))
+	if err != nil {
+		fail(models.CodeInvalidTimestamp, "ingested_at", err.Error())
+	}
+
+	var amount int64
+	if s := get("amount"); isNull(s) {
+		fail(models.CodeInvalidAmount, "amount", "missing or null value")
+	} else if amount, err = strconv.ParseInt(s, 10, 64); err != nil {
+		fail(models.CodeInvalidAmount, "amount", fmt.Sprintf("not an integer: %q", s))
+	}
+
+	event := models.TradeEvent{
+		EventID:    eventID,
+		TxHash:     nullable(get("tx_hash")),
+		BlockTime:  blockTime,
+		Wallet:     nullable(get("wallet")),
+		Side:       strings.ToUpper(nullable(get("side"))),
+		Amount:     amount,
+		IngestedAt: ingestedAt,
+	}
+	return event, errs
+}
+
+// parseTime accepts a full timestamp or a time of day (HH:MM:SS). Null or empty values return the zero time.
+func (p *Pipeline) parseTime(s string) (time.Time, error) {
+	if isNull(s) {
+		return time.Time{}, nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC(), nil
+	}
+	t, err := time.Parse("15:04:05", s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("cannot parse %q as HH:MM:SS or RFC 3339", s)
+	}
+	return p.FeedDate.Add(time.Duration(t.Hour())*time.Hour +
+		time.Duration(t.Minute())*time.Minute +
+		time.Duration(t.Second())*time.Second), nil
+}
+
+func isNull(s string) bool {
+	return s == "" || strings.EqualFold(s, "null")
+}
+
+func nullable(s string) string {
+	if isNull(s) {
+		return ""
+	}
+	return s
+}
+
+func WriteClean(w io.Writer, events []models.TradeEvent) error {
+	cw := csv.NewWriter(w)
+	if err := cw.Write(Columns); err != nil {
+		return err
+	}
+	for _, e := range events {
+		if err := cw.Write([]string{
+			e.EventID,
+			e.TxHash,
+			e.BlockTime.UTC().Format(time.RFC3339),
+			e.Wallet,
+			e.Side,
+			strconv.FormatInt(e.Amount, 10),
+			e.IngestedAt.UTC().Format(time.RFC3339),
+		}); err != nil {
+			return err
+		}
+	}
+	cw.Flush()
+	return cw.Error()
+}
+
+func WriteDeadLetter(w io.Writer, rejected []Rejected) error {
+	cw := csv.NewWriter(w)
+	if err := cw.Write(append(append([]string{"line"}, Columns...), "error_codes", "error_details")); err != nil {
+		return err
+	}
+	for _, r := range rejected {
+		codes := make([]string, len(r.Errors))
+		details := make([]string, len(r.Errors))
+		for i, e := range r.Errors {
+			codes[i] = string(e.Code)
+			details[i] = e.Field + ": " + e.Reason
+		}
+		row := append([]string{strconv.Itoa(r.Line)}, r.Raw...)
+		row = append(row, strings.Join(codes, ";"), strings.Join(details, "; "))
+		if err := cw.Write(row); err != nil {
+			return err
+		}
+	}
+	cw.Flush()
+	return cw.Error()
+}
+
+// writes clean.csv and dead_letter.csv into dir output.
+func WriteOutputs(dir string, result *Result) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := writeFile(filepath.Join(dir, "clean.csv"), func(w io.Writer) error {
+		return WriteClean(w, result.Clean)
+	}); err != nil {
+		return err
+	}
+	return writeFile(filepath.Join(dir, "dead_letter.csv"), func(w io.Writer) error {
+		return WriteDeadLetter(w, result.DeadLetter)
+	})
+}
+
+func writeFile(path string, write func(io.Writer) error) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if err := write(f); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
