@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -80,6 +81,17 @@ func (p *Pipeline) Process(r io.Reader) (*Result, error) {
 			break
 		}
 		line++
+		var parseErr *csv.ParseError
+		if errors.As(err, &parseErr) {
+			raw := ordered(record, index)
+			result.DeadLetter = append(result.DeadLetter, Rejected{Line: line, Raw: raw, Errors: []models.ValidationError{{
+				EventID: nullable(strings.TrimSpace(raw[0])),
+				Code:    models.CodeMalformedRow,
+				Field:   "row",
+				Reason:  fmt.Sprintf("invalid CSV: %v", parseErr.Err),
+			}}})
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("line %d: failed to read record: %w", line, err)
 		}

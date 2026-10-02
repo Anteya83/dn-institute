@@ -36,7 +36,7 @@ ok  	trade_feed_validator/validator	3.431s
 ```
 
 <details>
-<summary>Full verbose output (21 tests, 8 subtests, all passing)</summary>
+<summary>Full verbose output (22 tests, 8 subtests, all passing)</summary>
 
 ```
 ?   	trade_feed_validator	[no test files]
@@ -55,6 +55,8 @@ ok  	trade_feed_validator/validator	3.431s
 --- PASS: TestMissingHeaderColumnIsAnError (0.00s)
 === RUN   TestBadRowsGoToDeadLetterWithoutStoppingThePipeline
 --- PASS: TestBadRowsGoToDeadLetterWithoutStoppingThePipeline (0.00s)
+=== RUN   TestInvalidCSVRowIsDeadLetteredAndProcessingContinues
+--- PASS: TestInvalidCSVRowIsDeadLetteredAndProcessingContinues (0.00s)
 === RUN   TestNullVariantsAreTreatedAsMissing
 --- PASS: TestNullVariantsAreTreatedAsMissing (0.00s)
 === RUN   TestNullEventIDIsMissingField
@@ -133,8 +135,10 @@ Loading the feed as-is gives a total volume of 705 000; after validation it is
    amount, block_time; later `ingested_at`). Volume and VWAP weight are doubled:
    `0xD4` shows 360 000 BUY instead of 240 000, and its trade count is inflated,
    which skews wallet activity and clustering.
-2. **evt_007 (exact duplicate)** — even `ingested_at` is identical, so this is our
-   loader writing the same batch twice, not an indexer retry. Same effect:
+2. **evt_007 (exact duplicate)** — even `ingested_at` is identical. This hints at
+   the same record being written twice (e.g. a batch replay) rather than a later
+   re-delivery, but the feed has no provenance to confirm where it came from, so
+   it gets its own code to make it easy to investigate separately. Same effect:
    `0xF6` shows 180 000 BUY instead of 90 000.
 3. **evt_005 (null block_time)** — the trade cannot be placed in any time bucket.
    Time-windowed volume and VWAP either skip it or, if `null` is replaced by a

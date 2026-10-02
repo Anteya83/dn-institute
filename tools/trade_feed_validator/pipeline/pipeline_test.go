@@ -141,6 +141,25 @@ func TestBadRowsGoToDeadLetterWithoutStoppingThePipeline(t *testing.T) {
 	}
 }
 
+func TestInvalidCSVRowIsDeadLetteredAndProcessingContinues(t *testing.T) {
+	feed := header +
+		"evt_1,0x1,09:00:00,0xA,BUY,10,09:00:01\n" +
+		"evt_2,0x\"2,09:00:00,0xA,BUY,10,09:00:01\n" + // bare quote inside a field
+		"evt_3,0x3,09:00:00,0xA,SELL,10,09:00:01\n"
+	result := process(t, feed)
+
+	if len(result.Clean) != 2 || result.Clean[0].EventID != "evt_1" || result.Clean[1].EventID != "evt_3" {
+		t.Fatalf("expected evt_1 and evt_3 to be clean, got %+v", result.Clean)
+	}
+	if len(result.DeadLetter) != 1 {
+		t.Fatalf("expected 1 dead-lettered row, got %+v", result.DeadLetter)
+	}
+	r := result.DeadLetter[0]
+	if r.Line != 3 || len(r.Errors) != 1 || r.Errors[0].Code != models.CodeMalformedRow {
+		t.Errorf("got line %d errors %+v, want line 3 malformed_row", r.Line, r.Errors)
+	}
+}
+
 func TestNullVariantsAreTreatedAsMissing(t *testing.T) {
 	feed := header +
 		"evt_1,0x1,,0xA,BUY,10,09:00:01\n" +
