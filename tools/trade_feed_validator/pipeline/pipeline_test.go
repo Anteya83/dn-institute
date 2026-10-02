@@ -128,6 +128,7 @@ func TestBadRowsGoToDeadLetterWithoutStoppingThePipeline(t *testing.T) {
 		"evt_1,0x1,09:00:00,0xA,BUY\n" + // too few fields
 		"evt_2,0x2,09:00:00,0xA,BUY,12.5,09:00:01\n" + // not an integer
 		"evt_3,0x3,9am,0xA,BUY,10,09:00:01\n" + // bad timestamp
+		"evt_5,0x5,09:00:00,0xA,BUY,10,09:00:01,extra\n" + // more fields than the header
 		"evt_4,0x4,09:00:00,0xA,sell,10,09:00:01\n" // lower-case side is normalized
 	result := process(t, feed)
 
@@ -135,6 +136,7 @@ func TestBadRowsGoToDeadLetterWithoutStoppingThePipeline(t *testing.T) {
 		"evt_1": models.CodeMalformedRow,
 		"evt_2": models.CodeInvalidAmount,
 		"evt_3": models.CodeInvalidTimestamp,
+		"evt_5": models.CodeMalformedRow,
 	}
 	got := rejectedCodes(result)
 	for id, code := range want {

@@ -2,6 +2,7 @@ package validator
 
 import (
 	"fmt"
+	"time"
 
 	"trade_feed_validator/models"
 )
@@ -70,7 +71,7 @@ func CheckFields(event models.TradeEvent) []models.ValidationError {
 	if !event.BlockTime.IsZero() && !event.IngestedAt.IsZero() && event.BlockTime.After(event.IngestedAt) {
 		add(models.CodeBlockTimeAfterIngest, "block_time",
 			fmt.Sprintf("block_time %s is after ingested_at %s",
-				event.BlockTime.UTC().Format("15:04:05"), event.IngestedAt.UTC().Format("15:04:05")))
+				event.BlockTime.UTC().Format(time.RFC3339), event.IngestedAt.UTC().Format(time.RFC3339)))
 	}
 
 	return errs
@@ -104,6 +105,6 @@ func (v *Validator) checkDuplicates(event models.TradeEvent) []models.Validation
 		Code:    models.CodeRedeliveredDuplicate,
 		Field:   "tx_hash",
 		Reason: fmt.Sprintf("same trade as %s delivered again at %s",
-			original.EventID, event.IngestedAt.UTC().Format("15:04:05")),
+			original.EventID, event.IngestedAt.UTC().Format(time.RFC3339)),
 	}}
 }

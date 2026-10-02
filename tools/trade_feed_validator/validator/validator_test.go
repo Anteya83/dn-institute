@@ -64,7 +64,11 @@ func TestBlockTimeAfterIngestedAt(t *testing.T) {
 	e := validEvent("evt_008", "0xaa6")
 	e.BlockTime = at("10:10:00")
 	e.IngestedAt = at("09:59:50")
-	assertCodes(t, NewValidator().Validate(e), models.CodeBlockTimeAfterIngest)
+	errs := NewValidator().Validate(e)
+	assertCodes(t, errs, models.CodeBlockTimeAfterIngest)
+	if want := "block_time 2026-01-01T10:10:00Z is after ingested_at 2026-01-01T09:59:50Z"; errs[0].Reason != want {
+		t.Errorf("reason = %q, want %q", errs[0].Reason, want)
+	}
 }
 
 func TestBlockTimeEqualToIngestedAtIsAccepted(t *testing.T) {

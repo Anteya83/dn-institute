@@ -31,8 +31,8 @@ timestamps (`2026-03-05T23:59:58Z`), which are also accepted.
 $ go test ./... -v
 ?   	trade_feed_validator	[no test files]
 ?   	trade_feed_validator/models	[no test files]
-ok  	trade_feed_validator/pipeline	3.666s
-ok  	trade_feed_validator/validator	3.431s
+ok  	trade_feed_validator/pipeline	1.053s
+ok  	trade_feed_validator/validator	0.801s
 ```
 
 <details>
@@ -64,7 +64,7 @@ ok  	trade_feed_validator/validator	3.431s
 === RUN   TestWriteOutputs
 --- PASS: TestWriteOutputs (0.00s)
 PASS
-ok  	trade_feed_validator/pipeline	3.666s
+ok  	trade_feed_validator/pipeline	1.053s
 === RUN   TestValidEventIsAccepted
 --- PASS: TestValidEventIsAccepted (0.00s)
 === RUN   TestMissingBlockTime
@@ -104,7 +104,7 @@ ok  	trade_feed_validator/pipeline	3.666s
     --- PASS: TestFieldChecks/negative_amount (0.00s)
     --- PASS: TestFieldChecks/several_problems_at_once (0.00s)
 PASS
-ok  	trade_feed_validator/validator	3.431s
+ok  	trade_feed_validator/validator	0.801s
 ```
 
 </details>

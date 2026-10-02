@@ -101,7 +101,7 @@ func (p *Pipeline) Process(r io.Reader) (*Result, error) {
 
 		line, _ := reader.FieldPos(0)
 		raw := ordered(record, index)
-		event, errs := p.parseRecord(record, index)
+		event, errs := p.parseRecord(record, index, len(header))
 		if len(errs) == 0 {
 			result.RawVolume += event.Amount
 			errs = p.validator.Validate(event)
@@ -186,22 +186,20 @@ func ordered(record []string, index map[string]int) []string {
 	return out
 }
 
-func (p *Pipeline) parseRecord(record []string, index map[string]int) (models.TradeEvent, []models.ValidationError) {
+func (p *Pipeline) parseRecord(record []string, index map[string]int, width int) (models.TradeEvent, []models.ValidationError) {
 	get := func(col string) string { return strings.TrimSpace(record[index[col]]) }
 	eventID := ""
 	if index["event_id"] < len(record) {
 		eventID = nullable(get("event_id"))
 	}
 
-	for _, col := range Columns {
-		if index[col] >= len(record) {
-			return models.TradeEvent{}, []models.ValidationError{{
-				EventID: eventID,
-				Code:    models.CodeMalformedRow,
-				Field:   col,
-				Reason:  fmt.Sprintf("row has %d fields, expected %d", len(record), len(Columns)),
-			}}
-		}
+	if len(record) != width {
+		return models.TradeEvent{}, []models.ValidationError{{
+			EventID: eventID,
+			Code:    models.CodeMalformedRow,
+			Field:   "row",
+			Reason:  fmt.Sprintf("row has %d fields, header has %d", len(record), width),
+		}}
 	}
 
 	var errs []models.ValidationError
