@@ -119,6 +119,11 @@ ok  	trade_feed_validator/validator	3.431s
 Bold rows are rejected; the first copy of each duplicate is kept. evt_001 and
 evt_002 are not duplicates: same wallet and amount, but different transactions.
 
+The feed has no `log_index`, so duplicates are detected by trade content
+(tx_hash, wallet, side, amount, block_time). This is ambiguous: two genuinely
+identical fills in one transaction would be treated as a duplicate. When the
+feed carries `log_index`, `(tx_hash, log_index)` should be the key instead.
+
 ## Downstream impact
 
 Loading the feed as-is gives a total volume of 705 000; after validation it is
@@ -128,7 +133,8 @@ Loading the feed as-is gives a total volume of 705 000; after validation it is
    amount, block_time; later `ingested_at`). Volume and VWAP weight are doubled:
    `0xD4` shows 360 000 BUY instead of 240 000, and its trade count is inflated,
    which skews wallet activity and clustering.
-2. **evt_007 (exact duplicate)** — even `ingested_at` is identical, so this is same effect:
+2. **evt_007 (exact duplicate)** — even `ingested_at` is identical, so this is our
+   loader writing the same batch twice, not an indexer retry. Same effect:
    `0xF6` shows 180 000 BUY instead of 90 000.
 3. **evt_005 (null block_time)** — the trade cannot be placed in any time bucket.
    Time-windowed volume and VWAP either skip it or, if `null` is replaced by a
@@ -161,7 +167,9 @@ evt_005 goes to `dead_letter.csv` with its raw values and code
 **What would change the answer:**
 - RPC access inside the pipeline → backfill from the chain automatically.
 - The transaction doesn't exist on-chain → drop it, it isn't a real trade.
-- For analytics, the time doesn’t matter if there is a hash.
+- A metric that doesn't need time (e.g. all-time volume or trade count per
+  wallet) → load it with a `missing_block_time` flag and include it there, but
+  keep it out of every time-windowed metric (hourly volume, VWAP windows).
 - The metric window is already published and restatements aren't allowed → keep
   it in the queue and report it as a known gap.
 

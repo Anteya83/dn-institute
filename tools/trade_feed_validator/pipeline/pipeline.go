@@ -260,8 +260,9 @@ func WriteDeadLetter(w io.Writer, rejected []Rejected) error {
 }
 
 // writes clean.csv and dead_letter.csv into dir output.
-// Both files go to temporary files first and are renamed into place only after
-// both were written, so a failed run leaves the previous pair untouched.
+// Each file is written to a temporary file and renamed into place only after
+// both were written, so a failed write never leaves a partial file. The pair
+// is not published atomically; concurrent runs must use different -out dirs.
 func WriteOutputs(dir string, result *Result) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
