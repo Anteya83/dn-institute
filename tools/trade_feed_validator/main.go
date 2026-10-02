@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	dateFlag := flag.String("date", "2026-01-01", "UTC date (YYYY-MM-DD) for feeds that only contain times of day")
+	dateFlag := flag.String("date", "", "UTC date (YYYY-MM-DD) of the feed; required when timestamps are times of day only")
 	outDir := flag.String("out", "output", "directory for clean.csv and dead_letter.csv")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [-date YYYY-MM-DD] [-out DIR] [feed.csv]\n", os.Args[0])
@@ -25,10 +25,14 @@ func main() {
 		filename = flag.Arg(0)
 	}
 
-	feedDate, err := time.Parse("2006-01-02", *dateFlag)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "invalid -date %q: %v\n", *dateFlag, err)
-		os.Exit(2)
+	var feedDate time.Time
+	if *dateFlag != "" {
+		d, err := time.Parse("2006-01-02", *dateFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid -date %q: %v\n", *dateFlag, err)
+			os.Exit(2)
+		}
+		feedDate = d
 	}
 
 	fmt.Printf("Begin trade feed from: %s\n\n", filename)

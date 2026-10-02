@@ -47,18 +47,23 @@ func (r *Result) CleanVolume() int64 {
 	return total
 }
 
+// ErrFeedDateRequired stops the run instead of inventing a calendar day for
+// time-only timestamps.
+var ErrFeedDateRequired = errors.New("feed has time-only timestamps but no feed date was given (use -date YYYY-MM-DD)")
+
 type Pipeline struct {
-	// FeedDate is the UTC day the feed belongs to. The sample feed only has
-	// times of day, so they are anchored to this date instead of time.Now().
+	// FeedDate is the UTC day the feed belongs to. Time-only values (HH:MM:SS)
+	// are anchored to it; if it is zero, such values stop the run.
 	FeedDate  time.Time
 	validator *validator.Validator
 }
 
 func NewPipeline(feedDate time.Time) *Pipeline {
-	return &Pipeline{
-		FeedDate:  time.Date(feedDate.Year(), feedDate.Month(), feedDate.Day(), 0, 0, 0, 0, time.UTC),
-		validator: validator.NewValidator(),
+	p := &Pipeline{validator: validator.NewValidator()}
+	if !feedDate.IsZero() {
+		p.FeedDate = time.Date(feedDate.Year(), feedDate.Month(), feedDate.Day(), 0, 0, 0, 0, time.UTC)
 	}
+	return p
 }
 
 func (p *Pipeline) Process(r io.Reader) (*Result, error) {
@@ -101,7 +106,10 @@ func (p *Pipeline) Process(r io.Reader) (*Result, error) {
 
 		line, _ := reader.FieldPos(0)
 		raw := ordered(record, index)
-		event, errs := p.parseRecord(record, index, len(header))
+		event, errs, err := p.parseRecord(record, index, len(header))
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %w", line, err)
+		}
 		if len(errs) == 0 {
 			result.RawVolume += event.Amount
 			errs = p.validator.Validate(event)
@@ -186,7 +194,9 @@ func ordered(record []string, index map[string]int) []string {
 	return out
 }
 
-func (p *Pipeline) parseRecord(record []string, index map[string]int, width int) (models.TradeEvent, []models.ValidationError) {
+// parseRecord returns row-level problems as validation errors; a non-nil error
+// means the whole run must stop.
+func (p *Pipeline) parseRecord(record []string, index map[string]int, width int) (models.TradeEvent, []models.ValidationError, error) {
 	get := func(col string) string { return strings.TrimSpace(record[index[col]]) }
 	eventID := ""
 	if index["event_id"] < len(record) {
@@ -199,7 +209,7 @@ func (p *Pipeline) parseRecord(record []string, index map[string]int, width int)
 			Code:    models.CodeMalformedRow,
 			Field:   "row",
 			Reason:  fmt.Sprintf("row has %d fields, header has %d", len(record), width),
-		}}
+		}}, nil
 	}
 
 	var errs []models.ValidationError
@@ -208,11 +218,15 @@ func (p *Pipeline) parseRecord(record []string, index map[string]int, width int)
 	}
 
 	blockTime, err := p.parseTime(get("block_time"))
-	if err != nil {
+	if errors.Is(err, ErrFeedDateRequired) {
+		return models.TradeEvent{}, nil, err
+	} else if err != nil {
 		fail(models.CodeInvalidTimestamp, "block_time", err.Error())
 	}
 	ingestedAt, err := p.parseTime(get("ingested_at"))
-	if err != nil {
+	if errors.Is(err, ErrFeedDateRequired) {
+		return models.TradeEvent{}, nil, err
+	} else if err != nil {
 		fail(models.CodeInvalidTimestamp, "ingested_at", err.Error())
 	}
 
@@ -232,7 +246,7 @@ func (p *Pipeline) parseRecord(record []string, index map[string]int, width int)
 		Amount:     amount,
 		IngestedAt: ingestedAt,
 	}
-	return event, errs
+	return event, errs, nil
 }
 
 // parseTime accepts a full timestamp or a time of day (HH:MM:SS). Null or empty values return the zero time.
@@ -246,6 +260,9 @@ func (p *Pipeline) parseTime(s string) (time.Time, error) {
 	t, err := time.Parse("15:04:05", s)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("cannot parse %q as HH:MM:SS or RFC 3339", s)
+	}
+	if p.FeedDate.IsZero() {
+		return time.Time{}, ErrFeedDateRequired
 	}
 	return p.FeedDate.Add(time.Duration(t.Hour())*time.Hour +
 		time.Duration(t.Minute())*time.Minute +

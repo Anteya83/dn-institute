@@ -3,6 +3,7 @@ package pipeline
 import (
 	"bytes"
 	"encoding/csv"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,6 +92,15 @@ func TestTimesAreAnchoredToFeedDate(t *testing.T) {
 	want := time.Date(2026, 1, 1, 9, 14, 2, 0, time.UTC)
 	if !result.Clean[0].BlockTime.Equal(want) {
 		t.Errorf("block_time = %s, want %s", result.Clean[0].BlockTime, want)
+	}
+
+	_, err := NewPipeline(time.Time{}).Process(strings.NewReader(header + "evt_1,0x1,09:14:02,0xA,BUY,1,09:14:05\n"))
+	if !errors.Is(err, ErrFeedDateRequired) {
+		t.Errorf("time-only feed without a feed date: got %v, want ErrFeedDateRequired", err)
+	}
+	full, err := NewPipeline(time.Time{}).Process(strings.NewReader(header + "evt_1,0x1,2026-03-05T09:14:02Z,0xA,BUY,1,2026-03-05T09:14:05Z\n"))
+	if err != nil || len(full.Clean) != 1 {
+		t.Errorf("full timestamps must not need a feed date: err %v, result %+v", err, full)
 	}
 }
 

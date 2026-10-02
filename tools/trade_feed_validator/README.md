@@ -14,12 +14,15 @@ Requires Go 1.22+. No third-party dependencies.
 ```bash
 cd tools/trade_feed_validator
 go mod download            # nothing to download, verifies the module
-go run . sample_feed.csv   # writes output/clean.csv and output/dead_letter.csv
+go run . -date 2026-01-01 sample_feed.csv   # writes output/clean.csv and output/dead_letter.csv
 go test ./... -v
 ```
 
-The sample feed only has times of day; they are anchored to the UTC date given
-by `-date` (default `2026-01-01`). All times get the same date, so a time-only
+The sample feed only has times of day and no calendar date, so `-date` is
+required: it is the UTC day the feed belongs to (the task gives none, so
+2026-01-01 above is only an example). Without it the run stops instead of
+guessing a day. Feeds with full RFC 3339 timestamps don't need `-date`.
+All times get the same date, so a time-only
 feed that crosses midnight would wrongly flag trades as
 `block_time_after_ingested_at` — such feeds should use full RFC 3339
 timestamps (`2026-03-05T23:59:58Z`), which are also accepted.
@@ -31,8 +34,8 @@ timestamps (`2026-03-05T23:59:58Z`), which are also accepted.
 $ go test ./... -v
 ?   	trade_feed_validator	[no test files]
 ?   	trade_feed_validator/models	[no test files]
-ok  	trade_feed_validator/pipeline	1.053s
-ok  	trade_feed_validator/validator	0.801s
+ok  	trade_feed_validator/pipeline	0.581s
+ok  	trade_feed_validator/validator	0.782s
 ```
 
 <details>
@@ -64,7 +67,7 @@ ok  	trade_feed_validator/validator	0.801s
 === RUN   TestWriteOutputs
 --- PASS: TestWriteOutputs (0.00s)
 PASS
-ok  	trade_feed_validator/pipeline	1.053s
+ok  	trade_feed_validator/pipeline	0.581s
 === RUN   TestValidEventIsAccepted
 --- PASS: TestValidEventIsAccepted (0.00s)
 === RUN   TestMissingBlockTime
@@ -104,7 +107,7 @@ ok  	trade_feed_validator/pipeline	1.053s
     --- PASS: TestFieldChecks/negative_amount (0.00s)
     --- PASS: TestFieldChecks/several_problems_at_once (0.00s)
 PASS
-ok  	trade_feed_validator/validator	0.801s
+ok  	trade_feed_validator/validator	0.782s
 ```
 
 </details>
