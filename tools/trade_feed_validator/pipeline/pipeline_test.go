@@ -122,7 +122,7 @@ func TestBadRowsGoToDeadLetterWithoutStoppingThePipeline(t *testing.T) {
 		"evt_1,0x1,09:00:00,0xA,BUY\n" + // too few fields
 		"evt_2,0x2,09:00:00,0xA,BUY,12.5,09:00:01\n" + // not an integer
 		"evt_3,0x3,9am,0xA,BUY,10,09:00:01\n" + // bad timestamp
-		"evt_4,0x4,09:00:00,0xA,sell,10,09:00:01\n" // lower-case side is normalied
+		"evt_4,0x4,09:00:00,0xA,sell,10,09:00:01\n" // lower-case side is normalized
 	result := process(t, feed)
 
 	want := map[string]models.Code{
@@ -153,6 +153,24 @@ func TestNullVariantsAreTreatedAsMissing(t *testing.T) {
 	}
 }
 
+func TestNullEventIDIsMissingField(t *testing.T) {
+	feed := header +
+		"null,0x1,09:00:00,0xA,BUY,10,09:00:01\n" +
+		"NULL,0x2,09:00:00,0xA,BUY,10,09:00:01\n"
+	result := process(t, feed)
+	if len(result.Clean) != 0 {
+		t.Fatalf("expected no clean events, got %+v", result.Clean)
+	}
+	if len(result.DeadLetter) != 2 {
+		t.Fatalf("expected 2 dead-lettered rows, got %d", len(result.DeadLetter))
+	}
+	for _, r := range result.DeadLetter {
+		if len(r.Errors) != 1 || r.Errors[0].Code != models.CodeMissingField || r.Errors[0].Field != "event_id" {
+			t.Errorf("line %d: got %+v, want missing_field on event_id", r.Line, r.Errors)
+		}
+	}
+}
+
 func TestWriteOutputs(t *testing.T) {
 	result, err := NewPipeline(feedDate).ProcessFile("../sample_feed.csv")
 	if err != nil {
@@ -161,6 +179,18 @@ func TestWriteOutputs(t *testing.T) {
 	dir := t.TempDir()
 	if err := WriteOutputs(dir, result); err != nil {
 		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if strings.Join(names, ",") != "clean.csv,dead_letter.csv" {
+		t.Errorf("output dir contains %v, want only clean.csv and dead_letter.csv", names)
 	}
 
 	clean := readCSV(t, filepath.Join(dir, "clean.csv"))

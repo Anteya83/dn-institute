@@ -19,7 +19,11 @@ go test ./... -v
 ```
 
 The sample feed only has times of day; they are anchored to the UTC date given
-by `-date` (default `2026-01-01`).
+by `-date` (default `2026-01-01`). All times get the same date, so a time-only
+feed that crosses midnight would wrongly flag trades as
+`block_time_after_ingested_at` — such feeds should use full RFC 3339
+timestamps (`2026-03-05T23:59:58Z`), which are also accepted.
+
 
 ### Test output
 
@@ -32,7 +36,7 @@ ok  	trade_feed_validator/validator	3.431s
 ```
 
 <details>
-<summary>Full verbose output (20 tests, 8 subtests, all passing)</summary>
+<summary>Full verbose output (21 tests, 8 subtests, all passing)</summary>
 
 ```
 ?   	trade_feed_validator	[no test files]
@@ -53,6 +57,8 @@ ok  	trade_feed_validator/validator	3.431s
 --- PASS: TestBadRowsGoToDeadLetterWithoutStoppingThePipeline (0.00s)
 === RUN   TestNullVariantsAreTreatedAsMissing
 --- PASS: TestNullVariantsAreTreatedAsMissing (0.00s)
+=== RUN   TestNullEventIDIsMissingField
+--- PASS: TestNullEventIDIsMissingField (0.00s)
 === RUN   TestWriteOutputs
 --- PASS: TestWriteOutputs (0.00s)
 PASS

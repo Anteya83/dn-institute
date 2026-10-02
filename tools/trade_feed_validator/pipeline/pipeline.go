@@ -140,7 +140,7 @@ func (p *Pipeline) parseRecord(record []string, index map[string]int) (models.Tr
 	get := func(col string) string { return strings.TrimSpace(record[index[col]]) }
 	eventID := ""
 	if index["event_id"] < len(record) {
-		eventID = get("event_id")
+		eventID = nullable(get("event_id"))
 	}
 
 	for _, col := range Columns {
@@ -260,28 +260,58 @@ func WriteDeadLetter(w io.Writer, rejected []Rejected) error {
 }
 
 // writes clean.csv and dead_letter.csv into dir output.
+// Both files go to temporary files first and are renamed into place only after
+// both were written, so a failed run leaves the previous pair untouched.
 func WriteOutputs(dir string, result *Result) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	if err := writeFile(filepath.Join(dir, "clean.csv"), func(w io.Writer) error {
-		return WriteClean(w, result.Clean)
-	}); err != nil {
-		return err
+	outputs := []struct {
+		name  string
+		write func(io.Writer) error
+	}{
+		{"clean.csv", func(w io.Writer) error { return WriteClean(w, result.Clean) }},
+		{"dead_letter.csv", func(w io.Writer) error { return WriteDeadLetter(w, result.DeadLetter) }},
 	}
-	return writeFile(filepath.Join(dir, "dead_letter.csv"), func(w io.Writer) error {
-		return WriteDeadLetter(w, result.DeadLetter)
-	})
+
+	tmpPaths := make([]string, len(outputs))
+	defer func() {
+		for _, p := range tmpPaths {
+			if p != "" {
+				os.Remove(p)
+			}
+		}
+	}()
+
+	for i, out := range outputs {
+		p, err := writeTemp(dir, out.name, out.write)
+		if err != nil {
+			return fmt.Errorf("writing %s: %w", out.name, err)
+		}
+		tmpPaths[i] = p
+	}
+	for i, out := range outputs {
+		if err := os.Rename(tmpPaths[i], filepath.Join(dir, out.name)); err != nil {
+			return fmt.Errorf("publishing %s: %w", out.name, err)
+		}
+		tmpPaths[i] = ""
+	}
+	return nil
 }
 
-func writeFile(path string, write func(io.Writer) error) error {
-	f, err := os.Create(path)
+func writeTemp(dir, name string, write func(io.Writer) error) (string, error) {
+	f, err := os.CreateTemp(dir, "."+name+".tmp-*")
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := write(f); err != nil {
 		f.Close()
-		return err
+		os.Remove(f.Name())
+		return "", err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }
